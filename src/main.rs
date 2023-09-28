@@ -1,13 +1,8 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::{env, process, thread};
+use std::process::Command;
+use std::{env, process, ptr};
 
-use winapi::shared::windef::{HGDIOBJ, POINT};
-use winapi::um::winuser::{
-    keybd_event, GetCursorPos, GetKeyState,
-    GetSystemMetrics, VK_CONTROL, VK_DOWN, VK_LEFT, VK_RIGHT,
-    VK_SPACE, VK_UP,
-};
+use winapi::shared::windef::{HGDIOBJ, POINT, HWND, RECT};
+use winapi::um::winuser::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, WM_LBUTTONDOWN, WM_LBUTTONUP, PostMessageW, FindWindowExW, FindWindowW, GetWindowRect};
 
 use winapi::um::wingdi::{CreateCompatibleDC, DeleteDC, GetPixel, SelectObject};
 use winapi::um::winuser::{GetDC, ReleaseDC};
@@ -47,133 +42,114 @@ fn get_pixel_color(x: i32, y: i32) -> String {
     hex_color
 }
 
-// 获取系统分辨率
-fn get_system_res() -> (i32, i32) {
-    let width: i32;
-    let height: i32;
-    unsafe {
-        width = GetSystemMetrics(0); // SM_CXSCREEN
-        height = GetSystemMetrics(1); // SM_CYSCREEN
+// 获取系统实际分辨率
+fn get_act_res() -> (i32, i32){
+    let output = Command::new("wmic")
+        .args(["path", "Win32_VideoController", "get", "CurrentHorizontalResolution,CurrentVerticalResolution"])
+        .output()
+        .expect("exec error");
+
+    // 将命令的标准输出转换为字符串
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+
+    if !output.status.success() {
+        panic!("无法执行 wmic命令")
     }
-    (width, height)
+
+    let mut res_iter = stdout_str.split_whitespace().into_iter();
+    res_iter.next();
+    res_iter.next();
+    (res_iter.next().expect("无法获取实际宽度").parse().expect("解析为数字失败"),
+        res_iter.next().expect("无法获取实际高度").parse().expect("解析为数字失败"))
 }
 
-// 切换输入法模式
-fn switch_input_mode() {
-    // 模拟按下 Ctrl + Space 键
-    unsafe {
-        keybd_event(VK_CONTROL as u8, 0, 0, 0);
-        keybd_event(VK_SPACE as u8, 0, 0, 0);
-        keybd_event(VK_SPACE as u8, 0, 0x0002, 0);
-        keybd_event(VK_CONTROL as u8, 0, 0x0002, 0);
-    }
+// 获取系统当前的分辨率
+fn get_cur_res() -> (i32, i32) {
+    (unsafe { GetSystemMetrics(SM_CXSCREEN) }, unsafe { GetSystemMetrics(SM_CYSCREEN) })
 }
 
-// 计算原始坐标
-fn calc_original_pos(scale: u16, x: i32, y: i32) -> (i32, i32) {
-    let original_x = (x as f32 * (scale as f32 / 100.0)).ceil() as i32;
-    let original_y = (y as f32 * (scale as f32 / 100.0)).ceil() as i32;
+// 计算当前系统缩放的百分比
+fn get_scale() -> f32 {
+    let (x, _) = get_act_res();
+    let (x1, _) = get_cur_res();
+    x as f32 / x1 as f32
+}
+
+// 根据缩放百分比计算原始坐标
+fn calc_original_pos(scale: f32, x: i32, y: i32) -> (i32, i32) {
+    let original_x = (x as f32 * scale).ceil() as i32;
+    let original_y = (y as f32 * scale).ceil() as i32;
     (original_x, original_y)
 }
 
-// 获取当前鼠标的位置信息
-fn get_cursor_pos() -> (i32, i32) {
-    let mut cursor_pos: POINT = POINT { x: 0, y: 0 };
-    unsafe {
-        GetCursorPos(&mut cursor_pos);
-    }
-    (cursor_pos.x, cursor_pos.y)
+// 切换输入法模式
+unsafe fn switch_input_mode(input_indicator_handle: HWND) {
+    // 获取到输入窗口的子按键的句柄
+    let im_mode_button_handle = FindWindowExW(input_indicator_handle, ptr::null_mut(), "IMEModeButton\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null());
+
+    // 模拟点击操作
+    PostMessageW(im_mode_button_handle, WM_LBUTTONDOWN, 0, 0);
+    PostMessageW(im_mode_button_handle, WM_LBUTTONUP, 0, 0);
 }
 
-// 取色器
-fn color_picker() {
-    let (x, y) = get_cursor_pos();
+// 获取到系统托盘内输入指示的窗口句柄
+unsafe fn get_input_indicator_handle() -> HWND {
+    let taskbar_handle = FindWindowW("Shell_TrayWnd\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null());
 
-    let x = RefCell::new(x);
-    let y = RefCell::new(y);
-    let scale = 125;
+    let notify_handle = FindWindowExW(taskbar_handle, ptr::null_mut(), "TrayNotifyWnd\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null());
+    // 查找通知区域图标的句柄
+    FindWindowExW(notify_handle, ptr::null_mut(), "TrayInputIndicatorWClass\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null())
+}
 
-    let mut key_map: HashMap<i32, Box<dyn FnMut()>> = HashMap::new();
-    key_map.insert( VK_SPACE, Box::new(|| {
-        process::exit(0);
-    }));
+fn get_cur_code() -> (u8, HWND) {
+    let scale = get_scale();
+    let mut code: u8 = 2;
+    unsafe{
+        // 查找通知区域图标的句柄
+        let input_indicator_handle = get_input_indicator_handle();
 
-    key_map.insert(VK_UP, Box::new(|| {
-        let mut m_y = y.borrow_mut();
-        *m_y += 1;
-        let (o_x, o_y) = calc_original_pos(scale, *x.borrow(), *m_y);
-        println!("({}, {}) : {}", o_x, o_y, get_pixel_color(o_x, o_y))
-    }));
-
-    key_map.insert(VK_DOWN, Box::new(|| {
-        let mut m_y = y.borrow_mut();
-        *m_y += 1;
-        let (o_x, o_y) = calc_original_pos(scale, *x.borrow(), *m_y);
-        println!("({}, {}) : {}", o_x, o_y, get_pixel_color(o_x, o_y))
-    }));
-
-    key_map.insert(VK_LEFT, Box::new(|| {
-        let mut m_x = x.borrow_mut();
-        *m_x -= 1;
-        let (o_x, o_y) = calc_original_pos(scale, *m_x, *y.borrow());
-        println!("({}, {}) : {}", o_x, o_y, get_pixel_color(o_x, o_y))
-    }));
-
-    key_map.insert(VK_RIGHT, Box::new(|| {
-        let mut m_x = x.borrow_mut();
-        *m_x += 1;
-        let (o_x, o_y) = calc_original_pos(scale, *m_x, *y.borrow());
-        println!("({}, {}) : {}", o_x, o_y, get_pixel_color(o_x, o_y))
-    }));
-    unsafe {
-        // 循环检查空格键是否按下
-        loop {
-            for (key, callback) in key_map.iter_mut() {
-                if (GetKeyState(*key) as u16 & 0x8000) != 0 {
-                    callback();
-                }
-            }
-            thread::sleep(std::time::Duration::from_millis(60));
+        // 获取窗口的位置和大小
+        let mut rect: RECT = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        GetWindowRect(input_indicator_handle, &mut rect);
+        let mut x_offset = 6;
+        let mut y_offset = 10;
+        if rect.bottom - rect.top > 30 {
+            x_offset = 6;
+            y_offset = 15;
         }
+        let (x, y) = (rect.right - x_offset, rect.bottom - y_offset);
+        let (x, y) = calc_original_pos(scale, x, y);
+        let hex_color = get_pixel_color(x, y);
+        if "#FFFFFF".eq(&hex_color) {
+            code = 1;
+        }
+        return (code, input_indicator_handle);
     }
 }
 
 fn main() {
     let mut arg_iter = env::args();
     arg_iter.next();
-    // 获取中英输入模式状态的坐标
-    let x = 2348;
-    let y = 1422;
 
-    // if let Some(arg) = arg_iter.next() {
-    if let Some(arg) = Some("-p") {
-        if "-p" == arg {
-            color_picker();
-            process::exit(0);
+    // 获取当前输入法模式
+    let (cur_code, input_indicator_handle) = get_cur_code();
+    if let Some(arg) = arg_iter.next() {
+        let err_msg = "参数必须为1(英)/2(中)";
+        let code: u8 = arg.parse().expect(err_msg);
+        if code != 1 && code != 2 {
+            panic!("{}", err_msg)
         }
-    }
-
-    // 根据`中`和`英`不同像素分布判断当前是什么模式
-    // let input_code = match get_pixel_color(x, y) {
-    //     "#FFFFFF" => 1,
-    //     "#101010" => 2,
-    //     _ => process::exit(1),
-    // };
-    let input_code = 1;
-    //
-    // 获取命令行输入的参数
-    let arg = match arg_iter.next() {
-        Some(arg) => arg,
-        None => {
-            println!("{}", input_code);
-            process::exit(0);
+        // 参数和当前的输入法不同则切换输入法
+        if code != cur_code {
+            unsafe{ switch_input_mode(input_indicator_handle) }
         }
-    };
-
-    let arg_code: u32 = arg.parse().expect("参数解析错误！");
-    // 解析输入的参数，并切换为对应的输入法
-    if input_code == arg_code {
         process::exit(0);
     }
-    switch_input_mode();
+    // 没有参数则直接打印当前的输入模式
+    println!("{}", cur_code);
 }
