@@ -8,8 +8,8 @@ use winapi::um::wingdi::{CreateCompatibleDC, DeleteDC, GetPixel, SelectObject};
 use winapi::um::winuser::{GetDC, ReleaseDC};
 
 // 获取当前坐标像素点的颜色
-fn get_pixel_color(x: i32, y: i32) -> String {
-    let hex_color;
+fn get_pixel_color(x: i32, y: i32) -> u32 {
+    let pixel_color;
     unsafe {
         let hdc_screen = GetDC(std::ptr::null_mut()); // 获取屏幕的设备上下文
         let hdc_compatible = CreateCompatibleDC(hdc_screen); // 创建兼容的设备上下文
@@ -24,22 +24,24 @@ fn get_pixel_color(x: i32, y: i32) -> String {
         winapi::um::winuser::ClientToScreen(std::ptr::null_mut(), &mut point);
 
         // 使用 GetPixel 获取指定像素的颜色
-        let pixel_color = GetPixel(hdc_screen, point.x, point.y);
+        pixel_color = GetPixel(hdc_screen, point.x, point.y);
 
         // 释放资源
         SelectObject(hdc_compatible, old_bitmap);
         DeleteDC(hdc_compatible);
         ReleaseDC(std::ptr::null_mut(), hdc_screen);
-
-        // 提取颜色的红、绿、蓝分量
-        let red = pixel_color & 0xFF;
-        let green = (pixel_color >> 8) & 0xFF;
-        let blue = (pixel_color >> 16) & 0xFF;
-
-        // 将分量转换为十六进制并格式化为字符串
-        hex_color = format!("#{:02X}{:02X}{:02X}", red, green, blue);
     }
-    hex_color
+   pixel_color 
+}
+
+fn _get_hex_color(pixel_color: u32) -> String{
+    // 提取颜色的红、绿、蓝分量
+    let red = pixel_color & 0xFF;
+    let green = (pixel_color >> 8) & 0xFF;
+    let blue = (pixel_color >> 16) & 0xFF;
+
+    // 将分量转换为十六进制并格式化为字符串,并打印
+    format!("#{:02X}{:02X}{:02X}", red, green, blue)
 }
 
 // 获取系统实际分辨率
@@ -116,18 +118,21 @@ fn get_cur_code() -> (u8, HWND) {
             bottom: 0,
         };
         GetWindowRect(input_indicator_handle, &mut rect);
-        let mut x_offset = 6;
-        let mut y_offset = 10;
-        if rect.bottom - rect.top > 30 {
-            x_offset = 6;
-            y_offset = 15;
-        }
-        let (x, y) = (rect.right - x_offset, rect.bottom - y_offset);
-        let (x, y) = calc_original_pos(scale, x, y);
-        let hex_color = get_pixel_color(x, y);
-        if "#FFFFFF".eq(&hex_color) {
+
+        let window_width = rect.right - rect.left;
+        let window_height =  rect.bottom - rect.top;
+
+        // 根据背景颜色和输入模式问题不重合的部分判断当前的输入模式
+        let (bg_x, bg_y) = calc_original_pos(scale, rect.left + 1, rect.top + 1);
+        let (font_x, font_y) = calc_original_pos(scale, rect.left + (window_width / 2), rect.bottom - (window_height as f32 / 2.6) as i32);
+
+        let bg_color = get_pixel_color(bg_x, bg_y);
+        let font_color = get_pixel_color(font_x, font_y);
+
+        if bg_color == font_color {
             code = 1;
         }
+
         return (code, input_indicator_handle);
     }
 }
