@@ -1,160 +1,131 @@
-use std::process::Command;
-use std::{env, process, ptr};
+use std::iter::once;
+use std::mem::MaybeUninit;
+use std::os::windows::ffi::OsStrExt;
+use std::ptr::null_mut;
+use winapi::ctypes::c_void as cvd;
 
-use winapi::shared::windef::{HGDIOBJ, POINT, HWND, RECT};
-use winapi::um::winuser::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, WM_LBUTTONDOWN, WM_LBUTTONUP, PostMessageW, FindWindowExW, FindWindowW, GetWindowRect};
+use winapi::shared::minwindef::{BOOL, FALSE, TRUE};
+use winapi::shared::windef::{HWND, RECT};
+use winapi::um::wingdi::{CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetBitmapBits, GetObjectW, SelectObject, BITMAP};
+use winapi::um::winnt::LPCWSTR;
+use winapi::um::winuser::{FindWindowExW, FindWindowW, GetClientRect, GetDC, PostMessageW, PrintWindow, ReleaseDC, PW_CLIENTONLY, WM_LBUTTONDOWN, WM_LBUTTONUP};
+use winapi::um::winbase::{GlobalAlloc, GlobalFree, GPTR};
 
-use winapi::um::wingdi::{CreateCompatibleDC, DeleteDC, GetPixel, SelectObject};
-use winapi::um::winuser::{GetDC, ReleaseDC};
+// 转换 LPCWSTR 字符串
+fn l(text: &str) -> LPCWSTR {
+    let wide: Vec<u16> = std::ffi::OsStr::new(text).encode_wide().chain(once(0)).collect();
+    wide.as_ptr()
+}
 
-// 获取当前坐标像素点的颜色
-fn get_pixel_color(x: i32, y: i32) -> u32 {
-    let pixel_color;
+// 获取系统托盘处输入指示器句柄
+fn get_ime_handle() -> HWND {
     unsafe {
-        let hdc_screen = GetDC(std::ptr::null_mut()); // 获取屏幕的设备上下文
-        let hdc_compatible = CreateCompatibleDC(hdc_screen); // 创建兼容的设备上下文
-
-        // 创建一个 POINT 结构来指定坐标
-        let mut point = POINT { x, y };
-
-        // 将兼容的设备上下文选入屏幕设备上下文
-        let old_bitmap: HGDIOBJ = SelectObject(hdc_compatible, hdc_screen as HGDIOBJ);
-
-        // 使用 ClientToScreen 将坐标转换为屏幕坐标
-        winapi::um::winuser::ClientToScreen(std::ptr::null_mut(), &mut point);
-
-        // 使用 GetPixel 获取指定像素的颜色
-        pixel_color = GetPixel(hdc_screen, point.x, point.y);
-
-        // 释放资源
-        SelectObject(hdc_compatible, old_bitmap);
-        DeleteDC(hdc_compatible);
-        ReleaseDC(std::ptr::null_mut(), hdc_screen);
+        let system_tray = FindWindowW(l("Shell_TrayWnd"), null_mut());
+        if system_tray.is_null() { panic!("can not find 'Shell_TrayWnd' window"); }
+        let tray_notify = FindWindowExW(system_tray, null_mut(), l("TrayNotifyWnd"), null_mut());
+        if tray_notify.is_null() { panic!("can not find 'TrayNotifyWnd' window"); }
+        let input_indicator = FindWindowExW(tray_notify, null_mut(), l("TrayInputIndicatorWClass"), null_mut());
+        if tray_notify.is_null() { panic!("can not find 'TrayInputIndicatorWClass' window"); }
+        let ime_mode = FindWindowExW(input_indicator, null_mut(), l("IMEModeButton"), null_mut());
+        if ime_mode.is_null() { panic!("can not find 'IMEModeButton' window"); }
+        return ime_mode;
     }
-   pixel_color 
-}
-
-fn _get_hex_color(pixel_color: u32) -> String{
-    // 提取颜色的红、绿、蓝分量
-    let red = pixel_color & 0xFF;
-    let green = (pixel_color >> 8) & 0xFF;
-    let blue = (pixel_color >> 16) & 0xFF;
-
-    // 将分量转换为十六进制并格式化为字符串,并打印
-    format!("#{:02X}{:02X}{:02X}", red, green, blue)
-}
-
-// 获取系统实际分辨率
-fn get_act_res() -> (i32, i32){
-    let output = Command::new("wmic")
-        .args(["path", "Win32_VideoController", "get", "CurrentHorizontalResolution,CurrentVerticalResolution"])
-        .output()
-        .expect("exec error");
-
-    // 将命令的标准输出转换为字符串
-    let stdout_str = String::from_utf8_lossy(&output.stdout);
-
-    if !output.status.success() {
-        panic!("无法执行 wmic命令")
-    }
-
-    let mut res_iter = stdout_str.split_whitespace().into_iter();
-    res_iter.next();
-    res_iter.next();
-    (res_iter.next().expect("无法获取实际宽度").parse().expect("解析为数字失败"),
-        res_iter.next().expect("无法获取实际高度").parse().expect("解析为数字失败"))
-}
-
-// 获取系统当前的分辨率
-fn get_cur_res() -> (i32, i32) {
-    (unsafe { GetSystemMetrics(SM_CXSCREEN) }, unsafe { GetSystemMetrics(SM_CYSCREEN) })
-}
-
-// 计算当前系统缩放的百分比
-fn get_scale() -> f32 {
-    let (x, _) = get_act_res();
-    let (x1, _) = get_cur_res();
-    x as f32 / x1 as f32
-}
-
-// 根据缩放百分比计算原始坐标
-fn calc_original_pos(scale: f32, x: i32, y: i32) -> (i32, i32) {
-    let original_x = (x as f32 * scale).ceil() as i32;
-    let original_y = (y as f32 * scale).ceil() as i32;
-    (original_x, original_y)
 }
 
 // 切换输入法模式
-unsafe fn switch_input_mode(input_indicator_handle: HWND) {
-    // 获取到输入窗口的子按键的句柄
-    let im_mode_button_handle = FindWindowExW(input_indicator_handle, ptr::null_mut(), "IMEModeButton\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null());
-
-    // 模拟点击操作
-    PostMessageW(im_mode_button_handle, WM_LBUTTONDOWN, 0, 0);
-    PostMessageW(im_mode_button_handle, WM_LBUTTONUP, 0, 0);
+fn _switch_input_mode(hwnd: HWND) -> bool {
+    unsafe {
+        let btn_down_ok: BOOL = PostMessageW(hwnd, WM_LBUTTONDOWN, 0, 0);
+        let btn_up_ok: BOOL = PostMessageW(hwnd, WM_LBUTTONUP, 0, 0);
+        return btn_down_ok == TRUE && btn_up_ok == TRUE;
+    }
 }
 
-// 获取到系统托盘内输入指示的窗口句柄
-unsafe fn get_input_indicator_handle() -> HWND {
-    let taskbar_handle = FindWindowW("Shell_TrayWnd\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null());
-
-    let notify_handle = FindWindowExW(taskbar_handle, ptr::null_mut(), "TrayNotifyWnd\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null());
-    // 查找通知区域图标的句柄
-    FindWindowExW(notify_handle, ptr::null_mut(), "TrayInputIndicatorWClass\0".encode_utf16().collect::<Vec<u16>>().as_ptr(), ptr::null())
-}
-
-fn get_cur_code() -> (u8, HWND) {
-    let scale = get_scale();
-    let mut code: u8 = 2;
-    unsafe{
-        // 查找通知区域图标的句柄
-        let input_indicator_handle = get_input_indicator_handle();
-
-        // 获取窗口的位置和大小
-        let mut rect: RECT = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        GetWindowRect(input_indicator_handle, &mut rect);
-
-        let window_width = rect.right - rect.left;
-        let window_height =  rect.bottom - rect.top;
-
-        // 根据背景颜色和输入模式问题不重合的部分判断当前的输入模式
-        let (bg_x, bg_y) = calc_original_pos(scale, rect.left + 1, rect.top + 1);
-        let (font_x, font_y) = calc_original_pos(scale, rect.left + (window_width / 2), rect.bottom - (window_height as f32 / 2.6) as i32);
-
-        let bg_color = get_pixel_color(bg_x, bg_y);
-        let font_color = get_pixel_color(font_x, font_y);
-
-        if bg_color == font_color {
-            code = 1;
+// 获取当前输入模式
+fn get_input_mode(hwnd: HWND) -> u8 {
+    unsafe {
+        // 从窗口中获取位图
+        let hdc_window = GetDC(hwnd);
+        if hdc_window.is_null() { panic!("'GetDC' error"); }
+        let hdc_mem = CreateCompatibleDC(hdc_window);
+        if hdc_mem.is_null() { panic!("'CreateCompatibleDC' error"); }
+        let mut rect: MaybeUninit<RECT> = MaybeUninit::uninit();
+        let result: BOOL = GetClientRect(hwnd, rect.as_mut_ptr());
+        if result == FALSE { panic!("'GetClientRect' error") }
+        let rect = *rect.as_mut_ptr();
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        let h_bitmap = CreateCompatibleBitmap(hdc_window, width, height);
+        if h_bitmap.is_null() { panic!("'CreateCompatibleBitmap' error"); }
+        let h_gdi_obj = SelectObject(hdc_mem, h_bitmap as *mut cvd);
+        if h_gdi_obj.is_null() { panic!("'SelectObject' error"); }
+        // 打印窗口内容到内存DC
+        let result: BOOL = PrintWindow(hwnd, hdc_mem, PW_CLIENTONLY);
+        if result == FALSE { panic!("'PrintWindow' error") }
+        let mut bmp: MaybeUninit<BITMAP> = MaybeUninit::uninit();
+        let result: BOOL = GetObjectW(h_bitmap as *mut cvd, std::mem::size_of::<BITMAP>() as i32, bmp.as_mut_ptr() as *mut cvd);
+        if result == FALSE { panic!("'GetObjectW' error") }
+        let bmp = *bmp.as_mut_ptr();
+        // 获取位图的数据
+        let pixel_size = bmp.bmWidthBytes * bmp.bmHeight;
+        let p_pixels = GlobalAlloc(GPTR, pixel_size as usize);
+        let result: BOOL = GetBitmapBits(h_bitmap, pixel_size, p_pixels);
+        let pixels = p_pixels as *mut u8;
+        if result == FALSE { panic!("'GetBitmapBits' error") }
+        // 处理位图
+        // 判断输入模式
+        // 从右下角开始扫描
+        let mut mode: u8 = 2;
+        let (mut flag, mut flag_x, mut flag_y) = (0, -1, -1);
+        for y in (0..bmp.bmHeight).rev() {
+            if flag_y != -1 && flag_y != y { break; }
+            for x in (0..bmp.bmWidth).rev() {
+                // 32位位图
+                let offset = y * bmp.bmWidthBytes + x * 4;
+                let r = *pixels.add(offset as usize);
+                if r == 0 { continue; }
+                if flag_y == -1 { flag_y = y; }
+                if flag != 0 {
+                    if x != flag_x - 1 {
+                        mode = 1;
+                        break;
+                    }
+                }
+                flag = r;
+                flag_x = x
+            }
         }
-
-        return (code, input_indicator_handle);
+        // 释放资源
+        GlobalFree(p_pixels);
+        DeleteObject(h_bitmap as *mut cvd);
+        DeleteDC(hdc_mem);
+        ReleaseDC(hwnd, hdc_window);
+        return mode;
     }
 }
 
 fn main() {
-    let mut arg_iter = env::args();
-    arg_iter.next();
-
-    // 获取当前输入法模式
-    let (cur_code, input_indicator_handle) = get_cur_code();
-    if let Some(arg) = arg_iter.next() {
-        let err_msg = "参数必须为1(英)/2(中)";
-        let code: u8 = arg.parse().expect(err_msg);
-        if code != 1 && code != 2 {
-            panic!("{}", err_msg)
-        }
-        // 参数和当前的输入法不同则切换输入法
-        if code != cur_code {
-            unsafe{ switch_input_mode(input_indicator_handle) }
-        }
-        process::exit(0);
-    }
-    // 没有参数则直接打印当前的输入模式
-    println!("{}", cur_code);
+    let hwnd = get_ime_handle();
+    //let _ = switch_input_mode(hwnd);
+    let mode = get_input_mode(hwnd);
+    print!("{mode}");
+    //let mut arg_iter = env::args();
+    //arg_iter.next();
+    //
+    //// 获取当前输入法模式
+    //let (cur_code, input_indicator_handle) = get_cur_code();
+    //if let Some(arg) = arg_iter.next() {
+    //    let err_msg = "参数必须为1(英)/2(中)";
+    //    let code: u8 = arg.parse().expect(err_msg);
+    //    if code != 1 && code != 2 {
+    //        panic!("{}", err_msg)
+    //    }
+    //    // 参数和当前的输入法不同则切换输入法
+    //    if code != cur_code {
+    //        unsafe{ switch_input_mode(input_indicator_handle) }
+    //    }
+    //    process::exit(0);
+    //}
+    //// 没有参数则直接打印当前的输入模式
+    //println!("{}", cur_code);
 }
