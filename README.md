@@ -1,9 +1,30 @@
 # im_select
-windows下切换输入法的中英模式
 
+windows 下切换输入法的 `中`/`英` 模式
 
-使用rust的winapi库实现
+```bash
+# 输出 
+#     1：英文模式
+#     2：中文模式
+im_select
 
-中英模式是根据系统托盘内输入指示图标某个位置的颜色进行判断的，所以需要将输入指示图标打开，状态栏主题设置为黑色（对主题有要求的可以在源码内修改对应的颜色）
+# 切换到英文模式
+im_select 1
 
-目前在Windows10下正常使用
+ # 切换到中文模式
+im_select 2
+```
+
+## 从源码安装
+
+测试
+
+```bash
+cargo test -- --test-threads=1
+```
+
+编译，二进制文件在：`.\target\release\im_select.exe`
+
+```bash
+cargo build --release
+```
