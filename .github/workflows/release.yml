@@ -1,0 +1,28 @@
+name: Build Release
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2  # 检出代码
+      # - name: Install winget
+      #   uses: Cyberboss/install-winget@v1
+      # - name: Install visual studio build tools
+      #   run: winget install --id Microsoft.VisualStudio.2022.Community --exact --silent --accept-source-agreements --accept-package-agreements
+      - name: Install Rust Toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Build
+        run: cargo build --target x86_64-pc-windows-msvc --release
+      - name: Compress
+        run: 7z a -tzip im_select.zip .\target\x86_64-pc-windows-msvc\release\im_select.exe
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: im_select.zip
